@@ -18,13 +18,13 @@ load_dotenv()
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 REDIS_URL = os.getenv("REDIS_URL")
+STRAPI_BASE_URL = os.getenv("STRAPI_BASE_URL")
 
-STRAPI_BASE_URL = "http://localhost:1337"
 STRAPI_PRODUCTS_URL = f"{STRAPI_BASE_URL}/api/products"
 STRAPI_PRODUCT_URL = f"{STRAPI_BASE_URL}/api/products/{{product_id}}?populate=picture"
 STRAPI_CARTS_URL = f"{STRAPI_BASE_URL}/api/carts"
 STRAPI_CART_ITEMS_URL = f"{STRAPI_BASE_URL}/api/cart-items"
-STRAPI_CUSTOMERS_URL = f"{STRAPI_BASE_URL}/api/clients"
+STRAPI_CUSTOMERS_URL = f"{STRAPI_BASE_URL}/api/customers"
 
 START = "START"
 HANDLE_MENU = "HANDLE_MENU"
@@ -452,6 +452,9 @@ def main():
     if not REDIS_URL:
         raise RuntimeError("Не найден REDIS_URL в .env")
 
+    if not STRAPI_BASE_URL:
+        raise RuntimeError("Не найден STRAPI_BASE_URL в .env")
+
     redis_client.ping()
 
     updater = Updater(TG_BOT_TOKEN)
@@ -466,7 +469,3 @@ def main():
     print("Бот запущен")
     updater.start_polling()
     updater.idle()
-
-
-if __name__ == "__main__":
-    main()
