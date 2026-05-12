@@ -1,4 +1,5 @@
 import os
+from functools import partial
 from io import BytesIO
 
 import redis
@@ -12,19 +13,16 @@ from telegram.ext import (
     CallbackQueryHandler,
     Filters,
 )
+from strapi_api import (
+    fetch_products,
+    fetch_product,
+    fetch_product_image,
+    fetch_cart_with_items,
+    create_cart_item,
+    delete_cart_item,
+    create_customer,
+)
 
-
-load_dotenv()
-
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-REDIS_URL = os.getenv("REDIS_URL")
-STRAPI_BASE_URL = os.getenv("STRAPI_BASE_URL")
-
-STRAPI_PRODUCTS_URL = f"{STRAPI_BASE_URL}/api/products"
-STRAPI_PRODUCT_URL = f"{STRAPI_BASE_URL}/api/products/{{product_id}}?populate=picture"
-STRAPI_CARTS_URL = f"{STRAPI_BASE_URL}/api/carts"
-STRAPI_CART_ITEMS_URL = f"{STRAPI_BASE_URL}/api/cart-items"
-STRAPI_CUSTOMERS_URL = f"{STRAPI_BASE_URL}/api/customers"
 
 START = "START"
 HANDLE_MENU = "HANDLE_MENU"
@@ -32,52 +30,10 @@ HANDLE_DESCRIPTION = "HANDLE_DESCRIPTION"
 HANDLE_CART = "HANDLE_CART"
 WAITING_EMAIL = "WAITING_EMAIL"
 
-redis_client = redis.from_url(REDIS_URL)
 
-
-def create_customer(telegram_id, email):
-    response = requests.post(
-        STRAPI_CUSTOMERS_URL,
-        json={
-            "data": {
-                "telegram_id": str(telegram_id),
-                "email": email,
-            }
-        },
-    )
-    response.raise_for_status()
-
-    return response.json()["data"]
-
-
-def fetch_products():
-    response = requests.get(STRAPI_PRODUCTS_URL)
-    response.raise_for_status()
-    return response.json()["data"]
-
-
-def fetch_product(product_id):
-    response = requests.get(STRAPI_PRODUCT_URL.format(product_id=product_id))
-    response.raise_for_status()
-    return response.json()["data"]
-
-
-def fetch_product_image(product):
-    picture = product["picture"]
-    image_url = picture["url"]
-    full_image_url = f"{STRAPI_BASE_URL}{image_url}"
-
-    response = requests.get(full_image_url)
-    response.raise_for_status()
-
-    image_file = BytesIO(response.content)
-    image_file.name = "product.jpg"
-    return image_file
-
-
-def fetch_cart_by_telegram_id(telegram_id):
+def fetch_cart_by_telegram_id(strapi_base_url, telegram_id):
     response = requests.get(
-        STRAPI_CARTS_URL,
+        f"{strapi_base_url}/api/carts",
         params={
             "filters[telegram_id][$eq]": str(telegram_id),
         },
@@ -85,32 +41,16 @@ def fetch_cart_by_telegram_id(telegram_id):
     response.raise_for_status()
 
     carts = response.json()["data"]
+
     if not carts:
         return None
 
     return carts[0]
 
 
-def fetch_cart_with_items(telegram_id):
-    response = requests.get(
-        STRAPI_CARTS_URL,
-        params={
-            "filters[telegram_id][$eq]": str(telegram_id),
-            "populate[cart_items][populate]": "product",
-        },
-    )
-    response.raise_for_status()
-
-    carts = response.json()["data"]
-    if not carts:
-        return None
-
-    return carts[0]
-
-
-def create_cart(telegram_id):
+def create_cart(strapi_base_url, telegram_id):
     response = requests.post(
-        STRAPI_CARTS_URL,
+        f"{strapi_base_url}/api/carts",
         json={
             "data": {
                 "telegram_id": str(telegram_id),
@@ -118,42 +58,17 @@ def create_cart(telegram_id):
         },
     )
     response.raise_for_status()
+
     return response.json()["data"]
 
 
-def get_or_create_cart(telegram_id):
-    cart = fetch_cart_by_telegram_id(telegram_id)
+def get_or_create_cart(strapi_base_url, telegram_id):
+    cart = fetch_cart_by_telegram_id(strapi_base_url, telegram_id)
 
     if cart:
         return cart
 
-    return create_cart(telegram_id)
-
-
-def create_cart_item(cart_document_id, product_document_id, quantity_kg=1):
-    response = requests.post(
-        STRAPI_CART_ITEMS_URL,
-        json={
-            "data": {
-                "quantity_kg": quantity_kg,
-                "cart": {
-                    "connect": [cart_document_id],
-                },
-                "product": {
-                    "connect": [product_document_id],
-                },
-            }
-        },
-    )
-    response.raise_for_status()
-    return response.json()["data"]
-
-
-def delete_cart_item(cart_item_document_id):
-    response = requests.delete(
-        f"{STRAPI_CART_ITEMS_URL}/{cart_item_document_id}"
-    )
-    response.raise_for_status()
+    return create_cart(strapi_base_url, telegram_id)
 
 
 def format_cart(cart):
@@ -186,10 +101,11 @@ def format_cart(cart):
         )
 
     message_lines.append(f"\nИтого: {total_price} руб.")
+
     return "\n".join(message_lines)
 
 
-def get_state(user_id):
+def get_state(redis_client, user_id):
     state = redis_client.get(f"user:{user_id}:state")
 
     if state is None:
@@ -198,12 +114,12 @@ def get_state(user_id):
     return state.decode("utf-8")
 
 
-def set_state(user_id, state):
+def set_state(redis_client, user_id, state):
     redis_client.set(f"user:{user_id}:state", state)
 
 
-def send_products_menu(bot, chat_id):
-    products = fetch_products()
+def send_products_menu(bot, chat_id, strapi_base_url):
+    products = fetch_products(strapi_base_url)
 
     keyboard = []
 
@@ -234,8 +150,8 @@ def send_products_menu(bot, chat_id):
     )
 
 
-def send_cart(bot, chat_id, telegram_id):
-    cart = fetch_cart_with_items(telegram_id)
+def send_cart(bot, chat_id, strapi_base_url, telegram_id):
+    cart = fetch_cart_with_items(strapi_base_url, telegram_id)
     cart_text = format_cart(cart)
 
     keyboard = []
@@ -278,15 +194,20 @@ def send_cart(bot, chat_id, telegram_id):
     )
 
 
-def handle_start(update, context):
+def handle_start(update, context, redis_client, strapi_base_url):
     user_id = update.effective_user.id
     chat_id = update.message.chat_id
 
-    set_state(user_id, HANDLE_MENU)
-    send_products_menu(context.bot, chat_id)
+    set_state(redis_client, user_id, HANDLE_MENU)
+
+    send_products_menu(
+        bot=context.bot,
+        chat_id=chat_id,
+        strapi_base_url=strapi_base_url,
+    )
 
 
-def handle_button(update, context):
+def handle_button(update, context, redis_client, strapi_base_url):
     query = update.callback_query
     query.answer()
 
@@ -294,7 +215,7 @@ def handle_button(update, context):
     chat_id = query.message.chat_id
     callback_data = query.data
 
-    state = get_state(user_id)
+    state = get_state(redis_client, user_id)
 
     if callback_data == "back_to_menu":
         context.bot.delete_message(
@@ -302,14 +223,24 @@ def handle_button(update, context):
             message_id=query.message.message_id,
         )
 
-        set_state(user_id, HANDLE_MENU)
-        send_products_menu(context.bot, chat_id)
+        set_state(redis_client, user_id, HANDLE_MENU)
+
+        send_products_menu(
+            bot=context.bot,
+            chat_id=chat_id,
+            strapi_base_url=strapi_base_url,
+        )
         return
 
-
     if callback_data == "show_cart":
-        send_cart(context.bot, chat_id, user_id)
-        set_state(user_id, HANDLE_CART)
+        send_cart(
+            bot=context.bot,
+            chat_id=chat_id,
+            strapi_base_url=strapi_base_url,
+            telegram_id=user_id,
+        )
+
+        set_state(redis_client, user_id, HANDLE_CART)
         return
 
     if callback_data == "checkout":
@@ -318,30 +249,43 @@ def handle_button(update, context):
             text="Введите ваш email для оформления заказа:",
         )
 
-        set_state(user_id, WAITING_EMAIL)
+        set_state(redis_client, user_id, WAITING_EMAIL)
         return
 
     if callback_data.startswith("remove_cart_item_"):
         cart_item_document_id = callback_data.replace("remove_cart_item_", "")
 
-        delete_cart_item(cart_item_document_id)
+        delete_cart_item(
+            strapi_base_url=strapi_base_url,
+            cart_item_document_id=cart_item_document_id,
+        )
 
         context.bot.delete_message(
             chat_id=chat_id,
             message_id=query.message.message_id,
         )
 
-        send_cart(context.bot, chat_id, user_id)
-        set_state(user_id, HANDLE_CART)
+        send_cart(
+            bot=context.bot,
+            chat_id=chat_id,
+            strapi_base_url=strapi_base_url,
+            telegram_id=user_id,
+        )
+
+        set_state(redis_client, user_id, HANDLE_CART)
         return
 
     if callback_data.startswith("add_to_cart_"):
         product_document_id = callback_data.replace("add_to_cart_", "")
 
-        cart = get_or_create_cart(user_id)
+        cart = get_or_create_cart(
+            strapi_base_url=strapi_base_url,
+            telegram_id=user_id,
+        )
         cart_document_id = cart["documentId"]
 
         create_cart_item(
+            strapi_base_url=strapi_base_url,
             cart_document_id=cart_document_id,
             product_document_id=product_document_id,
             quantity_kg=1,
@@ -352,17 +296,21 @@ def handle_button(update, context):
             text="Товар добавлен в корзину.",
         )
 
-        set_state(user_id, HANDLE_DESCRIPTION)
+        set_state(redis_client, user_id, HANDLE_DESCRIPTION)
         return
 
     if state != HANDLE_MENU:
         query.edit_message_text("Сначала нажмите /start")
-        set_state(user_id, START)
+        set_state(redis_client, user_id, START)
         return
 
     if callback_data.startswith("product_"):
         product_id = callback_data.replace("product_", "")
-        product = fetch_product(product_id)
+
+        product = fetch_product(
+            strapi_base_url=strapi_base_url,
+            product_id=product_id,
+        )
 
         title = product["title"]
         description = product["description"]
@@ -373,7 +321,10 @@ def handle_button(update, context):
             f"{description}"
         )
 
-        image_file = fetch_product_image(product)
+        image_file = fetch_product_image(
+            strapi_base_url=strapi_base_url,
+            product=product,
+        )
 
         keyboard = [
             [
@@ -410,23 +361,24 @@ def handle_button(update, context):
             reply_markup=reply_markup,
         )
 
-        set_state(user_id, HANDLE_DESCRIPTION)
+        set_state(redis_client, user_id, HANDLE_DESCRIPTION)
         return
 
     query.edit_message_text("Неизвестная команда.")
-    set_state(user_id, START)
+    set_state(redis_client, user_id, START)
 
 
-def handle_message(update, context):
+def handle_message(update, context, redis_client, strapi_base_url):
     user_id = update.effective_user.id
     text = update.message.text
 
-    state = get_state(user_id)
+    state = get_state(redis_client, user_id)
 
     if state == WAITING_EMAIL:
         email = text.strip()
 
         customer = create_customer(
+            strapi_base_url=strapi_base_url,
             telegram_id=user_id,
             email=email,
         )
@@ -437,7 +389,7 @@ def handle_message(update, context):
             f"Спасибо! Мы получили вашу почту: {email}"
         )
 
-        set_state(user_id, START)
+        set_state(redis_client, user_id, START)
         return
 
     update.message.reply_text(
@@ -446,26 +398,63 @@ def handle_message(update, context):
 
 
 def main():
-    if not TG_BOT_TOKEN:
+    load_dotenv()
+
+    tg_bot_token = os.getenv("TG_BOT_TOKEN")
+    redis_url = os.getenv("REDIS_URL")
+    strapi_base_url = os.getenv("STRAPI_BASE_URL")
+
+    if not tg_bot_token:
         raise RuntimeError("Не найден TG_BOT_TOKEN в .env")
 
-    if not REDIS_URL:
+    if not redis_url:
         raise RuntimeError("Не найден REDIS_URL в .env")
 
-    if not STRAPI_BASE_URL:
+    if not strapi_base_url:
         raise RuntimeError("Не найден STRAPI_BASE_URL в .env")
 
+    redis_client = redis.from_url(redis_url)
     redis_client.ping()
 
-    updater = Updater(TG_BOT_TOKEN)
+    updater = Updater(tg_bot_token)
     dispatcher = updater.dispatcher
 
-    dispatcher.add_handler(CommandHandler("start", handle_start))
-    dispatcher.add_handler(CallbackQueryHandler(handle_button))
     dispatcher.add_handler(
-        MessageHandler(Filters.text & ~Filters.command, handle_message)
+        CommandHandler(
+            "start",
+            partial(
+                handle_start,
+                redis_client=redis_client,
+                strapi_base_url=strapi_base_url,
+            ),
+        )
+    )
+
+    dispatcher.add_handler(
+        CallbackQueryHandler(
+            partial(
+                handle_button,
+                redis_client=redis_client,
+                strapi_base_url=strapi_base_url,
+            )
+        )
+    )
+
+    dispatcher.add_handler(
+        MessageHandler(
+            Filters.text & ~Filters.command,
+            partial(
+                handle_message,
+                redis_client=redis_client,
+                strapi_base_url=strapi_base_url,
+            ),
+        )
     )
 
     print("Бот запущен")
     updater.start_polling()
     updater.idle()
+
+
+if __name__ == "__main__":
+    main()
