@@ -10,7 +10,10 @@ def fetch_products(strapi_base_url):
 
 def fetch_product(strapi_base_url, product_id):
     response = requests.get(
-        f"{strapi_base_url}/api/products/{product_id}?populate=picture"
+        f"{strapi_base_url}/api/products/{product_id}",
+        params={
+            "populate": "picture",
+        },
     )
     response.raise_for_status()
     return response.json()["data"]
